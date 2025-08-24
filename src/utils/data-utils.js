@@ -205,3 +205,190 @@ export async function mapDeepAsync(value, iteratee, options = {}) {
     }
     return _mapDeep(value, [], []);
 }
+
+export function generateUniqueId() {
+    /**
+     * Generates a unique identifier using timestamp and random string.
+     * Used for creating new IDs when cloning content objects.
+     * 
+     * @returns {string} A unique identifier in format "timestamp-random"
+     */
+    const timestamp = Date.now().toString(36);
+    const random = Math.random().toString(36).substring(2);
+    return `${timestamp}-${random}`;
+}
+
+export function updateSlugForClone(originalSlug, suffix = 'copy') {
+    /**
+     * Updates a slug to create a unique version for cloned content.
+     * Handles different slug formats including root paths.
+     * 
+     * @param {string} originalSlug - The original slug to update
+     * @param {string} suffix - The suffix to add (default: 'copy')
+     * @returns {string} The updated slug with suffix
+     */
+    if (!originalSlug) {
+        return `${suffix}-${generateUniqueId()}`;
+    }
+    
+    // Handle different slug formats
+    if (originalSlug === '/') {
+        return `/${suffix}`;
+    }
+    
+    // Remove leading slash if present for processing
+    const cleanSlug = originalSlug.startsWith('/') ? originalSlug.substring(1) : originalSlug;
+    
+    // Add suffix to create unique slug
+    const newSlug = cleanSlug ? `${cleanSlug}-${suffix}` : suffix;
+    
+    // Restore leading slash if original had it
+    return originalSlug.startsWith('/') ? `/${newSlug}` : newSlug;
+}
+
+export function cloneObject(object, options = {}) {
+    /**
+     * Creates a deep clone of a content object with updated metadata.
+     * Handles complex nested structures, arrays, and content-specific fields.
+     * 
+     * @param {Object} object - The object to clone
+     * @param {Object} options - Cloning options
+     * @param {boolean} options.updateIds - Whether to generate new IDs (default: true)
+     * @param {boolean} options.updateSlug - Whether to update slug fields (default: true)
+     * @param {string} options.idSuffix - Custom suffix for IDs (default: auto-generated)
+     * @param {string} options.slugSuffix - Suffix for slugs (default: 'copy')
+     * @param {boolean} options.updateTitle - Whether to update title field (default: true)
+     * @param {string} options.titleSuffix - Suffix for titles (default: '(Copy)')
+     * @returns {Object} The cloned object with updated metadata
+     */
+    const {
+        updateIds = true,
+        updateSlug = true,
+        idSuffix = '',
+        slugSuffix = 'copy',
+        updateTitle = true,
+        titleSuffix = '(Copy)'
+    } = options;
+
+    if (!object || typeof object !== 'object') {
+        return object;
+    }
+
+    // Handle arrays
+    if (Array.isArray(object)) {
+        return object.map(item => cloneObject(item, options));
+    }
+
+    // Deep clone the object
+    const cloned = {};
+    
+    for (const [key, value] of Object.entries(object)) {
+        if (value === null || value === undefined) {
+            cloned[key] = value;
+        } else if (Array.isArray(value)) {
+            cloned[key] = value.map(item => cloneObject(item, options));
+        } else if (typeof value === 'object' && value.constructor === Object) {
+            cloned[key] = cloneObject(value, options);
+        } else {
+            cloned[key] = value;
+        }
+    }
+
+    // Handle metadata updates
+    if (cloned.__metadata && updateIds) {
+        cloned.__metadata = { ...cloned.__metadata };
+        
+        // Generate new unique ID
+        const newId = idSuffix ? 
+            `${cloned.__metadata.id}-${idSuffix}` : 
+            `${cloned.__metadata.id}-${generateUniqueId()}`;
+        cloned.__metadata.id = newId;
+        
+        // Update relProjectPath if it exists
+        if (cloned.__metadata.relProjectPath) {
+            const pathParts = cloned.__metadata.relProjectPath.split('/');
+            const fileName = pathParts[pathParts.length - 1];
+            const [name, ext] = fileName.split('.');
+            const newFileName = idSuffix ? 
+                `${name}-${idSuffix}.${ext}` : 
+                `${name}-${generateUniqueId()}.${ext}`;
+            pathParts[pathParts.length - 1] = newFileName;
+            cloned.__metadata.relProjectPath = pathParts.join('/');
+        }
+        
+        // Update urlPath if it exists
+        if (cloned.__metadata.urlPath && updateSlug) {
+            cloned.__metadata.urlPath = updateSlugForClone(cloned.__metadata.urlPath, slugSuffix);
+        }
+    }
+
+    // Update slug field if it exists
+    if (updateSlug && cloned.slug) {
+        cloned.slug = updateSlugForClone(cloned.slug, slugSuffix);
+    }
+
+    // Update title if it exists
+    if (updateTitle && cloned.title && typeof cloned.title === 'string') {
+        cloned.title = `${cloned.title} ${titleSuffix}`;
+    }
+
+    return cloned;
+}
+
+export function cloneObjectWithReferences(object, allObjects, options = {}) {
+    /**
+     * Creates a clone of an object and optionally updates internal references.
+     * Useful when cloning objects that reference other objects by ID.
+     * 
+     * @param {Object} object - The object to clone
+     * @param {Array} allObjects - Array of all objects (for reference resolution)
+     * @param {Object} options - Cloning options
+     * @param {boolean} options.updateReferences - Whether to update reference IDs (default: false)
+     * @param {Map} options.referenceMap - Map to track old ID -> new ID mappings
+     * @returns {Object} The cloned object with optionally updated references
+     */
+    const {
+        updateReferences = false,
+        referenceMap = new Map(),
+        ...cloneOptions
+    } = options;
+
+    // First, clone the object
+    const cloned = cloneObject(object, cloneOptions);
+
+    // If we're not updating references, return the clone as-is
+    if (!updateReferences) {
+        return cloned;
+    }
+
+    // Store the mapping of old ID to new ID
+    if (object.__metadata?.id && cloned.__metadata?.id) {
+        referenceMap.set(object.__metadata.id, cloned.__metadata.id);
+    }
+
+    // Recursively update any string fields that might be references
+    function updateReferencesInObject(obj) {
+        if (!obj || typeof obj !== 'object') {
+            return obj;
+        }
+
+        if (Array.isArray(obj)) {
+            return obj.map(item => updateReferencesInObject(item));
+        }
+
+        const updated = {};
+        for (const [key, value] of Object.entries(obj)) {
+            if (typeof value === 'string' && referenceMap.has(value)) {
+                // This string value is a reference to another object, update it
+                updated[key] = referenceMap.get(value);
+            } else if (typeof value === 'object') {
+                updated[key] = updateReferencesInObject(value);
+            } else {
+                updated[key] = value;
+            }
+        }
+        return updated;
+    }
+
+    return updateReferencesInObject(cloned);
+}
